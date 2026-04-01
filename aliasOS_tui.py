@@ -1,0 +1,1232 @@
+#!/usr/bin/env python3
+"""
+aliasOS TUI — bad_banana operator profile manager
+Textual-based full CRUD alias manager + ecosystem map + live shell
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import ClassVar
+
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.color import Color
+from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.css.query import NoMatches
+from textual.reactive import reactive
+from textual.screen import ModalScreen, Screen
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    RichLog,
+    Select,
+    Static,
+    Switch,
+    TabbedContent,
+    TabPane,
+    TextArea,
+    Tree,
+)
+from textual.widgets.tree import TreeNode
+from rich.text import Text
+from rich.syntax import Syntax
+from rich.table import Table
+from rich import box
+
+# ─────────────────────────────────────────────
+# DATA LAYER
+# ─────────────────────────────────────────────
+
+ALIAS_DIR = Path.home() / ".aliases.d"
+BASHRC = Path.home() / ".bashrc"
+
+# Ecosystem BANANA_TREE layer definitions
+ECOSYSTEM = {
+    "OBSERVE": {
+        "color": "cyan",
+        "icon": "◉",
+        "tools": {
+            "LANimals Nexus": {
+                "root": "LANI_ROOT",
+                "desc": "Adaptive deception intelligence platform",
+                "aliases": ["nxcd"],
+                "status_cmd": "mon status 2>/dev/null || echo 'offline'",
+            },
+            "OpenSight": {
+                "root": "OPENSIGHT_ROOT",
+                "desc": "Investigative intelligence + knowledge graphs",
+                "aliases": ["oscd", "oi", "oadd", "ols", "opivot", "ostats", "odom"],
+                "status_cmd": "echo 'local'",
+            },
+            "TERRAIN": {
+                "root": "TERRAIN_ROOT",
+                "desc": "Local OSINT platform (SearxNG backend)",
+                "aliases": ["trcd", "rc", "rcrun", "rcstat"],
+                "status_cmd": "echo 'local'",
+            },
+        },
+    },
+    "SIMULATE": {
+        "color": "yellow",
+        "icon": "◈",
+        "tools": {
+            "Lune": {
+                "root": "LUNE_ROOT",
+                "desc": "Modular operator framework (60+ modules)",
+                "aliases": ["lucd", "mnew", "medit", "mreload"],
+                "status_cmd": "echo 'local'",
+            },
+            "Decoy-Hunter": {
+                "root": "",
+                "desc": "Deception detection engine",
+                "aliases": [],
+                "status_cmd": "echo 'local'",
+            },
+        },
+    },
+    "EXECUTE": {
+        "color": "red",
+        "icon": "◆",
+        "tools": {
+            "zer0DAYSlater": {
+                "root": "",
+                "desc": "Exploit framework",
+                "aliases": ["plb64", "plchain", "plhex", "plls", "plrs", "plurl"],
+                "status_cmd": "echo 'local'",
+            },
+            "Blackglass Suite": {
+                "root": "",
+                "desc": "Offensive tooling suite",
+                "aliases": [],
+                "status_cmd": "echo 'local'",
+            },
+        },
+    },
+    "ADAPT": {
+        "color": "green",
+        "icon": "◎",
+        "tools": {
+            "drift_orchestrator": {
+                "root": "DRIFT_ROOT",
+                "desc": "Runtime drift control + hallucination verification",
+                "aliases": ["driftcd", "driftlog", "driftsess"],
+                "status_cmd": "drift status 2>/dev/null || echo 'offline'",
+            },
+            "badBANANA zine": {
+                "root": "",
+                "desc": "Security research publishing (GnomeMan4201)",
+                "aliases": ["binbox", "bls", "bnew", "bstats", "dtls", "dtnew", "dtopen", "dtstats"],
+                "status_cmd": "echo 'active'",
+            },
+            "reflexive-identity": {
+                "root": "",
+                "desc": "Stylometric drift + identity framework",
+                "aliases": [],
+                "status_cmd": "echo 'local'",
+            },
+        },
+    },
+}
+
+# Gap analysis data — high priority missing aliases
+GAPS = [
+    ("Docker", "dps", "docker ps", "high"),
+    ("Docker", "dpsa", "docker ps -a", "high"),
+    ("Docker", "dlog", "docker logs -f", "high"),
+    ("Docker", "dex", "docker exec -it", "high"),
+    ("Docker", "dup", "docker-compose up -d", "high"),
+    ("Docker", "ddown", "docker-compose down", "high"),
+    ("Python venv", "ve", "python3 -m venv .venv", "high"),
+    ("Python venv", "va", "source .venv/bin/activate", "high"),
+    ("Python venv", "vd", "deactivate", "high"),
+    ("Python venv", "pipi", "pip install", "high"),
+    ("Python venv", "pipf", "pip freeze > requirements.txt", "high"),
+    ("Testing", "pt", "pytest", "high"),
+    ("Testing", "ptv", "pytest -v", "high"),
+    ("Testing", "cov", "pytest --cov=. --cov-report=term-missing", "high"),
+    ("Linting", "lint", "ruff check .", "high"),
+    ("Linting", "fmt", "black .", "high"),
+    ("Linting", "types", "mypy .", "high"),
+    ("Drift", "driftv", "drift verify", "high"),
+    ("Drift", "driftsnap", "drift snapshot", "high"),
+    ("Drift", "driftrpt", "drift report", "high"),
+    ("Drift", "driftreset", "drift reset", "high"),
+    ("SSH/GPG", "sshkeys", "ls -la ~/.ssh/", "medium"),
+    ("SSH/GPG", "gpgenc", "gpg --encrypt --armor -r", "medium"),
+    ("SSH/GPG", "gpgdec", "gpg --decrypt", "medium"),
+    ("Ollama", "ollpull", "ollama pull", "medium"),
+    ("Ollama", "ollrun", "ollama run", "medium"),
+    ("Ollama", "ollrm", "ollama rm", "medium"),
+    ("Firewall", "fwstatus", "sudo ufw status verbose", "medium"),
+    ("Firewall", "fwallow", "sudo ufw allow", "medium"),
+    ("Firewall", "fwdeny", "sudo ufw deny", "medium"),
+    ("Tmux", "tma", "tmux attach -t", "medium"),
+    ("Tmux", "tmls", "tmux ls", "medium"),
+    ("Tmux", "tmkill", "tmux kill-session -t", "medium"),
+    ("Archive", "untar", "tar -xzvf", "medium"),
+    ("Archive", "tarball", "tar -czf", "medium"),
+    ("Clipboard", "clip", "xclip -selection clipboard", "medium"),
+    ("Recon", "rls", "recon ls", "medium"),
+    ("Recon", "rnew", "recon new", "medium"),
+    ("OSINT", "oexp", "osint export", "medium"),
+    ("OSINT", "orpt", "osint report", "medium"),
+    ("Monitoring", "monstart", "mon start", "medium"),
+    ("Monitoring", "monrestart", "mon restart", "medium"),
+]
+
+
+@dataclass
+class AliasEntry:
+    name: str
+    command: str
+    source_file: Path
+    line_number: int = 0
+    category: str = "uncategorized"
+
+
+def detect_category(name: str, command: str) -> str:
+    """Infer category from alias name/command."""
+    rules = [
+        (r"^g(?!rep|pu)[a-z]{1,4}$", "git"),
+        (r"^(cpu|gpu|mem|disk|df|du|free|top|ps|kill|port|net|iface|local|wanip|my|dmesg|syslog|authlog|jl)", "system"),
+        (r"^(dns|cert|curl|http|hget|hpost|hput|hdel|hhead|hhist|hcoll|hfuzz|hrep|arp|ping|rtrace|bwtest|vpn|leak|ip)", "network"),
+        (r"^(oi|oadd|odom|ols|opivot|ostats|rc|recon|ia|il|iscan|iexp|istat|itop|ttp|tmat|tobs|trpt|tsearch|tcl|tcn|tioc|tsum|aiosint)", "osint"),
+        (r"^ai", "ai/llm"),
+        (r"^drift", "drift"),
+        (r"^(lucd|nxcd|oscd|trcd|ecos)", "ecosystem"),
+        (r"^(sn|sls|sl|sf|sclose|sexp|stl|mux|tts|ttl|ttnote|ttr|ttst)", "sessions"),
+        (r"^(api|csearch|pyc|pydep|ingest|run|semver|clog|relcut|rells|secrets|hash|jq|json|jwt|csv|hexdump|xxd|rg|strings)", "dev"),
+        (r"^(sc[a-z]|mnew|medit|mreload|regen)", "scaffold"),
+        (r"^(als|aliases|reload|ctx|refresh|cmd)", "aliasos"),
+        (r"^(bin|bls|bnew|bstats|dt)", "banana/devto"),
+        (r"^(pl[a-z])", "payload"),
+        (r"^(dash|dw[a-z]|mon|ca|cl|cpivot|cr)", "dashboard"),
+        (r"^(notes|todo|sc|nl|nq|ns|nshow|nstats|ndaily)", "notes"),
+        (r"^(update|install|remove|purge|search|show|autoremove)", "apt"),
+    ]
+    for pattern, cat in rules:
+        if re.match(pattern, name):
+            return cat
+    return "utility"
+
+
+def parse_alias_line(line: str) -> tuple[str, str] | None:
+    """Parse 'alias name='command'' or 'alias name="command"'"""
+    m = re.match(r"^\s*alias\s+([^=\s]+)=['\"]?(.*?)['\"]?\s*$", line)
+    if not m:
+        return None
+    name = m.group(1)
+    cmd = m.group(2).strip("'\"")
+    return name, cmd
+
+
+def load_aliases() -> list[AliasEntry]:
+    """Load all aliases from ~/.aliases.d/ and ~/.bashrc"""
+    entries: list[AliasEntry] = []
+    seen: set[str] = set()
+
+    sources: list[Path] = []
+    if ALIAS_DIR.exists():
+        sources.extend(sorted(ALIAS_DIR.rglob("*.sh")))
+        sources.extend(sorted(ALIAS_DIR.rglob("*.bash")))
+        sources.extend(sorted(ALIAS_DIR.rglob("aliases")))
+        sources.extend([p for p in sorted(ALIAS_DIR.iterdir()) if p.is_file() and p.suffix not in (".md", ".py", ".txt")])
+    if BASHRC.exists():
+        sources.append(BASHRC)
+
+    # deduplicate sources
+    seen_paths: set[Path] = set()
+    unique_sources = []
+    for s in sources:
+        if s not in seen_paths:
+            seen_paths.add(s)
+            unique_sources.append(s)
+
+    for src in unique_sources:
+        try:
+            lines = src.read_text(errors="replace").splitlines()
+        except Exception:
+            continue
+        for i, line in enumerate(lines):
+            parsed = parse_alias_line(line)
+            if not parsed:
+                continue
+            name, cmd = parsed
+            if name in seen:
+                continue
+            seen.add(name)
+            cat = detect_category(name, cmd)
+            entries.append(AliasEntry(
+                name=name,
+                command=cmd,
+                source_file=src,
+                line_number=i + 1,
+                category=cat,
+            ))
+
+    # If no files found (demo mode), load from shell
+    if not entries:
+        entries = _load_from_shell()
+
+    return sorted(entries, key=lambda e: e.name)
+
+
+def _load_from_shell() -> list[AliasEntry]:
+    """Fallback: parse `alias` output from current shell."""
+    entries = []
+    seen: set[str] = set()
+    try:
+        result = subprocess.run(
+            ["bash", "-i", "-c", "alias"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            parsed = parse_alias_line(line.replace("alias ", "", 1) if line.startswith("alias ") else line)
+            if not parsed:
+                # try format: name='cmd'
+                m = re.match(r"^([^=\s]+)=['\"]?(.*?)['\"]?\s*$", line.strip())
+                if m:
+                    parsed = (m.group(1), m.group(2).strip("'\""))
+            if parsed:
+                name, cmd = parsed
+                if name not in seen:
+                    seen.add(name)
+                    entries.append(AliasEntry(
+                        name=name,
+                        command=cmd,
+                        source_file=BASHRC,
+                        category=detect_category(name, cmd),
+                    ))
+    except Exception:
+        pass
+    return entries
+
+
+def write_alias(entry: AliasEntry) -> bool:
+    """Write/update a single alias in its source file."""
+    try:
+        path = entry.source_file
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+
+        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        new_line = f"alias {entry.name}='{entry.command}'\n"
+
+        # try to update in place
+        if entry.line_number > 0 and entry.line_number <= len(lines):
+            old = lines[entry.line_number - 1]
+            if f"alias {entry.name}=" in old:
+                lines[entry.line_number - 1] = new_line
+                path.write_text("".join(lines))
+                return True
+
+        # search by name
+        for i, line in enumerate(lines):
+            if re.match(rf"^\s*alias\s+{re.escape(entry.name)}\s*=", line):
+                lines[i] = new_line
+                path.write_text("".join(lines))
+                return True
+
+        # append
+        content = path.read_text(errors="replace")
+        if not content.endswith("\n"):
+            content += "\n"
+        path.write_text(content + new_line)
+        return True
+    except Exception as e:
+        return False
+
+
+def delete_alias(entry: AliasEntry) -> bool:
+    """Remove alias line from source file."""
+    try:
+        path = entry.source_file
+        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        new_lines = [
+            l for l in lines
+            if not re.match(rf"^\s*alias\s+{re.escape(entry.name)}\s*=", l)
+        ]
+        path.write_text("".join(new_lines))
+        return True
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────────
+# MODAL SCREENS
+# ─────────────────────────────────────────────
+
+class AliasEditModal(ModalScreen):
+    """Modal for creating or editing an alias."""
+
+    BINDINGS = [("escape", "dismiss", "cancel")]
+
+    CSS = """
+    AliasEditModal {
+        align: center middle;
+    }
+    #modal-container {
+        width: 70;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    #modal-title {
+        text-align: center;
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    .field-label {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    #modal-buttons {
+        margin-top: 1;
+        align: right middle;
+        height: 3;
+    }
+    """
+
+    def __init__(self, entry: AliasEntry | None = None, alias_files: list[Path] | None = None):
+        super().__init__()
+        self.entry = entry
+        self.alias_files = alias_files or ([ALIAS_DIR / "custom.sh"] if ALIAS_DIR.exists() else [BASHRC])
+        self.is_new = entry is None
+
+    def compose(self) -> ComposeResult:
+        title = "new alias" if self.is_new else f"edit — {self.entry.name}"
+        with Container(id="modal-container"):
+            yield Label(title, id="modal-title")
+            yield Label("name", classes="field-label")
+            yield Input(
+                value="" if self.is_new else self.entry.name,
+                placeholder="alias name (e.g. driftv)",
+                id="input-name",
+            )
+            yield Label("command", classes="field-label")
+            yield Input(
+                value="" if self.is_new else self.entry.command,
+                placeholder="command (e.g. drift verify)",
+                id="input-cmd",
+            )
+            yield Label("save to file", classes="field-label")
+            options = [(str(f.name), str(f)) for f in self.alias_files]
+            default = str(self.entry.source_file) if self.entry else str(self.alias_files[0])
+            yield Select(options, value=default, id="input-file")
+            with Horizontal(id="modal-buttons"):
+                yield Button("cancel", variant="default", id="btn-cancel")
+                yield Button("save", variant="primary", id="btn-save")
+
+    @on(Button.Pressed, "#btn-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#btn-save")
+    def save(self) -> None:
+        name = self.query_one("#input-name", Input).value.strip()
+        cmd = self.query_one("#input-cmd", Input).value.strip()
+        file_str = self.query_one("#input-file", Select).value
+
+        if not name or not cmd:
+            return
+
+        target_file = Path(file_str) if file_str else self.alias_files[0]
+        entry = AliasEntry(
+            name=name,
+            command=cmd,
+            source_file=target_file,
+            line_number=self.entry.line_number if self.entry else 0,
+            category=detect_category(name, cmd),
+        )
+        self.dismiss(entry)
+
+
+class ConfirmModal(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "no")]
+    CSS = """
+    ConfirmModal { align: center middle; }
+    #confirm-box {
+        width: 50; height: auto;
+        background: $surface;
+        border: thick $error;
+        padding: 1 2;
+        align: center middle;
+    }
+    #confirm-msg { text-align: center; margin-bottom: 1; }
+    #confirm-btns { align: center middle; height: 3; }
+    """
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Container(id="confirm-box"):
+            yield Label(self.message, id="confirm-msg")
+            with Horizontal(id="confirm-btns"):
+                yield Button("cancel", variant="default", id="no")
+                yield Button("delete", variant="error", id="yes")
+
+    @on(Button.Pressed, "#yes")
+    def yes(self): self.dismiss(True)
+    @on(Button.Pressed, "#no")
+    def no(self): self.dismiss(False)
+
+
+class GapApplyModal(ModalScreen):
+    """Preview and apply a gap suggestion."""
+    BINDINGS = [("escape", "dismiss", "cancel")]
+    CSS = """
+    GapApplyModal { align: center middle; }
+    #gap-box {
+        width: 70; height: auto;
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+    }
+    #gap-title { color: $warning; text-style: bold; margin-bottom: 1; }
+    .gap-preview {
+        background: $background;
+        border: solid $primary-darken-2;
+        padding: 0 1;
+        margin-bottom: 1;
+        color: $text;
+    }
+    #gap-btns { align: right middle; height: 3; margin-top: 1; }
+    """
+    def __init__(self, category: str, name: str, cmd: str):
+        super().__init__()
+        self.category = category
+        self.alias_name = name
+        self.alias_cmd = cmd
+
+    def compose(self) -> ComposeResult:
+        with Container(id="gap-box"):
+            yield Label(f"apply gap suggestion — {self.category}", id="gap-title")
+            yield Label(f"alias {self.alias_name}='{self.alias_cmd}'", classes="gap-preview")
+            yield Label("save to file", classes="field-label")
+            files = list(ALIAS_DIR.glob("*.sh")) if ALIAS_DIR.exists() else [BASHRC]
+            opts = [(f.name, str(f)) for f in files]
+            if opts:
+                yield Select(opts, id="gap-file")
+            else:
+                yield Label(str(BASHRC))
+            with Horizontal(id="gap-btns"):
+                yield Button("cancel", variant="default", id="gap-cancel")
+                yield Button("apply", variant="warning", id="gap-apply")
+
+    @on(Button.Pressed, "#gap-cancel")
+    def cancel(self): self.dismiss(None)
+
+    @on(Button.Pressed, "#gap-apply")
+    def apply(self):
+        try:
+            sel = self.query_one("#gap-file", Select)
+            val = sel.value
+            target = Path(val) if (val and isinstance(val, str) and val.startswith("/")) else (self._files[0] if hasattr(self, "_files") and self._files else BASHRC)
+        except Exception:
+            target = BASHRC
+        entry = AliasEntry(
+            name=self.alias_name,
+            command=self.alias_cmd,
+            source_file=target,
+            category=detect_category(self.alias_name, self.alias_cmd),
+        )
+        self.dismiss(entry)
+
+
+# ─────────────────────────────────────────────
+# MAIN APP
+# ─────────────────────────────────────────────
+
+CSS = """
+Screen {
+    layers: base overlay;
+}
+
+/* ── Header / Footer ── */
+Header {
+    background: $primary-darken-3;
+    color: $accent;
+    text-style: bold;
+}
+Footer {
+    background: $primary-darken-3;
+}
+
+/* ── Tab bar ── */
+TabbedContent > TabPane {
+    padding: 0;
+}
+
+/* ── Alias Browser ── */
+#alias-outer {
+    layout: horizontal;
+    height: 100%;
+}
+#cat-list {
+    width: 18;
+    border-right: solid $primary-darken-2;
+    background: $surface-darken-1;
+}
+#cat-list > ListItem {
+    padding: 0 1;
+}
+#cat-list > ListItem.--highlight {
+    background: $primary-darken-1;
+    color: $accent;
+}
+#alias-right {
+    width: 1fr;
+    height: 100%;
+    layout: vertical;
+}
+#search-input {
+    margin: 0 1;
+    height: 3;
+}
+#alias-table {
+    height: 1fr;
+}
+#alias-actions {
+    height: 3;
+    align: right middle;
+    padding: 0 1;
+    border-top: solid $primary-darken-2;
+}
+#alias-actions Button {
+    margin-left: 1;
+}
+#alias-detail {
+    height: 5;
+    border-top: solid $primary-darken-2;
+    padding: 0 1;
+    background: $surface-darken-1;
+    color: $text-muted;
+    overflow-y: auto;
+}
+
+/* ── Ecosystem Map ── */
+#eco-outer {
+    layout: horizontal;
+    height: 100%;
+}
+#eco-tree {
+    width: 30;
+    border-right: solid $primary-darken-2;
+}
+#eco-detail {
+    width: 1fr;
+    padding: 1 2;
+    overflow-y: auto;
+}
+.eco-layer-observe { color: cyan; text-style: bold; }
+.eco-layer-simulate { color: yellow; text-style: bold; }
+.eco-layer-execute { color: red; text-style: bold; }
+.eco-layer-adapt { color: green; text-style: bold; }
+.eco-tool-name { color: $accent; text-style: bold; }
+.eco-desc { color: $text-muted; }
+.eco-aliases { color: $success; }
+.eco-status-online { color: $success; }
+.eco-status-offline { color: $error; }
+
+/* ── Shell ── */
+#shell-outer {
+    layout: vertical;
+    height: 100%;
+}
+#shell-log {
+    height: 1fr;
+    border-bottom: solid $primary-darken-2;
+    background: $background;
+}
+#shell-input-row {
+    height: 3;
+    layout: horizontal;
+    align: left middle;
+    padding: 0 1;
+    background: $surface-darken-1;
+}
+#shell-prompt-label {
+    color: $success;
+    margin-right: 1;
+    width: auto;
+}
+#shell-input {
+    width: 1fr;
+}
+#shell-run-btn {
+    width: auto;
+    margin-left: 1;
+}
+#shell-clear-btn {
+    width: auto;
+    margin-left: 1;
+}
+
+/* ── Gap Analysis ── */
+#gap-outer {
+    layout: vertical;
+    height: 100%;
+}
+#gap-filter-row {
+    height: 3;
+    layout: horizontal;
+    align: left middle;
+    padding: 0 1;
+    border-bottom: solid $primary-darken-2;
+}
+#gap-priority-sel {
+    width: 20;
+    margin-left: 1;
+}
+#gap-table {
+    height: 1fr;
+}
+#gap-actions {
+    height: 3;
+    align: right middle;
+    padding: 0 1;
+    border-top: solid $primary-darken-2;
+}
+
+/* ── Misc ── */
+.section-header {
+    color: $accent;
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+.muted { color: $text-muted; }
+"""
+
+
+class AliasBrowserTab(Container):
+    """Tab: full alias browser with search, CRUD, category filter."""
+
+    aliases: reactive[list[AliasEntry]] = reactive([], layout=True)
+    selected_category: reactive[str] = reactive("all")
+    search_term: reactive[str] = reactive("")
+
+    def __init__(self):
+        super().__init__(id="alias-browser-tab")
+        self._all_aliases: list[AliasEntry] = []
+        self._alias_files: list[Path] = []
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="alias-outer"):
+            with ScrollableContainer(id="cat-list"):
+                yield ListView(id="cat-listview")
+            with Vertical(id="alias-right"):
+                yield Input(placeholder="search aliases...", id="search-input")
+                yield DataTable(id="alias-table", zebra_stripes=True, cursor_type="row")
+                with Horizontal(id="alias-actions"):
+                    yield Button("+ new", variant="primary", id="btn-new")
+                    yield Button("edit", variant="default", id="btn-edit")
+                    yield Button("delete", variant="error", id="btn-del")
+                yield Static("", id="alias-detail")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#alias-table", DataTable)
+        table.add_columns("alias", "command", "category", "source")
+        self.reload()
+
+    def reload(self) -> None:
+        self._all_aliases = load_aliases()
+        self._alias_files = list({e.source_file for e in self._all_aliases})
+        # collect alias files from disk too
+        if ALIAS_DIR.exists():
+            self._alias_files = list(set(self._alias_files) | set(ALIAS_DIR.glob("*.sh")))
+        self._refresh_categories()
+        self._refresh_table()
+
+    def _refresh_categories(self) -> None:
+        cats = sorted(set(e.category for e in self._all_aliases))
+        lv = self.query_one("#cat-listview", ListView)
+        lv.clear()
+        item = ListItem(Label("all"))
+        item._cat = "all"
+        lv.append(item)
+        for cat in cats:
+            count = sum(1 for e in self._all_aliases if e.category == cat)
+            item = ListItem(Label(f"{cat} ({count})"))
+            item._cat = cat
+            lv.append(item)
+
+    def _filtered(self) -> list[AliasEntry]:
+        entries = self._all_aliases
+        if self.selected_category != "all":
+            entries = [e for e in entries if e.category == self.selected_category]
+        if self.search_term:
+            q = self.search_term.lower()
+            entries = [e for e in entries if q in e.name.lower() or q in e.command.lower()]
+        return entries
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#alias-table", DataTable)
+        table.clear()
+        for entry in self._filtered():
+            src = entry.source_file.name if entry.source_file else "?"
+            table.add_row(
+                Text(entry.name, style="bold cyan"),
+                Text(entry.command[:60] + ("…" if len(entry.command) > 60 else ""), style="white"),
+                Text(entry.category, style="yellow"),
+                Text(src, style="dim"),
+                key=entry.name,
+            )
+
+    @on(ListView.Selected, "#cat-listview")
+    def category_selected(self, event: ListView.Selected) -> None:
+        cat = getattr(event.item, "_cat", "all")
+        self.selected_category = cat
+        self._refresh_table()
+
+    @on(Input.Changed, "#search-input")
+    def search_changed(self, event: Input.Changed) -> None:
+        self.search_term = event.value
+        self._refresh_table()
+
+    @on(DataTable.RowHighlighted, "#alias-table")
+    def row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key:
+            entry = next((e for e in self._all_aliases if e.name == str(event.row_key.value)), None)
+            if entry:
+                detail = self.query_one("#alias-detail", Static)
+                detail.update(
+                    f"[bold cyan]{entry.name}[/] = [white]{entry.command}[/]\n"
+                    f"[dim]file:[/] {entry.source_file}  [dim]line:[/] {entry.line_number}  [dim]cat:[/] {entry.category}\n"
+                    f"[dim]enter / double-click to run in shell[/]"
+                )
+
+    @on(DataTable.RowSelected, "#alias-table")
+    def row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key:
+            entry = next((e for e in self._all_aliases if e.name == str(event.row_key.value)), None)
+            if entry:
+                self._run_entry(entry)
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        if event.row_key:
+            entry = next((e for e in self._all_aliases if e.name == str(event.row_key.value)), None)
+            if entry:
+                self._run_entry(entry)
+
+    def _run_entry(self, entry) -> None:
+        try:
+            from textual.widgets import TabbedContent, Input
+            self.app.query_one(TabbedContent).active = "shell"
+            shell = self.app.query_one(ShellTab)
+            shell.query_one("#shell-input", Input).value = entry.command
+            shell._execute(entry.command)
+            ShellTab.HISTORY.append(entry.command)
+            self.app.notify(f"running: {entry.name}", severity="information")
+        except Exception:
+            pass
+
+    def _selected_entry(self) -> AliasEntry | None:
+        table = self.query_one("#alias-table", DataTable)
+        if table.cursor_row < 0:
+            return None
+        filtered = self._filtered()
+        if table.cursor_row >= len(filtered):
+            return None
+        return filtered[table.cursor_row]
+
+    @on(Button.Pressed, "#btn-new")
+    def new_alias(self) -> None:
+        self.app.push_screen(
+            AliasEditModal(alias_files=self._alias_files),
+            callback=self._on_edit_result,
+        )
+
+    @on(Button.Pressed, "#btn-edit")
+    def edit_alias(self) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            return
+        self.app.push_screen(
+            AliasEditModal(entry=entry, alias_files=self._alias_files),
+            callback=self._on_edit_result,
+        )
+
+    def _on_edit_result(self, result: AliasEntry | None) -> None:
+        if result:
+            write_alias(result)
+            self.reload()
+            self.app.notify(f"saved: {result.name}", severity="information")
+
+    @on(Button.Pressed, "#btn-del")
+    def delete_alias(self) -> None:
+        entry = self._selected_entry()
+        if not entry:
+            return
+        self.app.push_screen(
+            ConfirmModal(f"delete alias '{entry.name}'?"),
+            callback=lambda result: self._on_delete_result(result, entry),
+        )
+
+    def _on_delete_result(self, confirmed: bool | None, entry: AliasEntry) -> None:
+        if confirmed:
+            delete_alias(entry)
+            self.reload()
+            self.app.notify(f"deleted: {entry.name}", severity="warning")
+
+
+class EcosystemTab(Container):
+    """Tab: BANANA_TREE ecosystem map with live status probes."""
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="eco-outer"):
+            yield Tree("BANANA_TREE", id="eco-tree")
+            yield ScrollableContainer(Static("", id="eco-detail"))
+
+    def on_mount(self) -> None:
+        tree = self.query_one("#eco-tree", Tree)
+        tree.root.expand()
+        for layer, data in ECOSYSTEM.items():
+            icon = data["icon"]
+            node = tree.root.add(f"{icon} {layer}", expand=True)
+            for tool_name in data["tools"]:
+                node.add_leaf(tool_name)
+        self._show_overview()
+
+    def _show_overview(self) -> None:
+        lines = []
+        lines.append("[bold cyan]BANANA_TREE ecosystem[/]\n")
+        for layer, data in ECOSYSTEM.items():
+            color = data["color"]
+            icon = data["icon"]
+            lines.append(f"[bold {color}]{icon} {layer}[/]")
+            for tool_name, tool in data["tools"].items():
+                lines.append(f"  [bold]{tool_name}[/]")
+                lines.append(f"  [dim]{tool['desc']}[/]")
+                if tool["aliases"]:
+                    als = "  ".join(tool["aliases"])
+                    lines.append(f"  [green]{als}[/]")
+                lines.append("")
+        self.query_one("#eco-detail", Static).update("\n".join(lines))
+
+    @on(Tree.NodeSelected, "#eco-tree")
+    def node_selected(self, event: Tree.NodeSelected) -> None:
+        label = str(event.node.label)
+        # check if it's a layer
+        for layer, data in ECOSYSTEM.items():
+            if label.endswith(layer):
+                self._show_layer(layer, data)
+                return
+        # check if it's a tool
+        for layer, data in ECOSYSTEM.items():
+            if label in data["tools"]:
+                self._show_tool(layer, label, data["tools"][label])
+                return
+        self._show_overview()
+
+    def _show_layer(self, layer: str, data: dict) -> None:
+        color = data["color"]
+        icon = data["icon"]
+        lines = [f"[bold {color}]{icon} {layer}[/]\n"]
+        for tool_name, tool in data["tools"].items():
+            lines.append(f"[bold cyan]{tool_name}[/]")
+            lines.append(f"  {tool['desc']}")
+            root = os.environ.get(tool.get("root", ""), "")
+            if root:
+                lines.append(f"  [dim]root:[/] {root}")
+            if tool["aliases"]:
+                lines.append(f"  [green]aliases:[/] {', '.join(tool['aliases'])}")
+            lines.append("")
+        self.query_one("#eco-detail", Static).update("\n".join(lines))
+
+    @work(thread=True)
+    def _show_tool(self, layer: str, tool_name: str, tool: dict) -> None:
+        color = ECOSYSTEM[layer]["color"]
+        root_var = tool.get("root", "")
+        root_path = os.environ.get(root_var, f"${root_var} not set") if root_var else "n/a"
+
+        # probe status
+        status_cmd = tool.get("status_cmd", "echo 'unknown'")
+        try:
+            result = subprocess.run(
+                status_cmd, shell=True, capture_output=True, text=True, timeout=3
+            )
+            status = result.stdout.strip() or result.stderr.strip() or "unknown"
+        except Exception:
+            status = "timeout"
+
+        status_color = "green" if any(w in status.lower() for w in ["active", "running", "online", "local"]) else "red"
+
+        lines = [
+            f"[bold {color}]{tool_name}[/]\n",
+            f"[dim]layer:[/] {layer}",
+            f"[dim]desc:[/]  {tool['desc']}",
+            f"[dim]root:[/]  {root_path}",
+            f"[dim]status:[/] [{status_color}]{status}[/]",
+            "",
+        ]
+        if tool["aliases"]:
+            lines.append("[dim]aliases:[/]")
+            for a in tool["aliases"]:
+                lines.append(f"  [green]{a}[/]")
+        else:
+            lines.append("[dim]no aliases registered[/]")
+
+        self.app.call_from_thread(
+            self.query_one("#eco-detail", Static).update,
+            "\n".join(lines)
+        )
+
+
+class ShellTab(Container):
+    """Tab: live shell execution with output log."""
+
+    HISTORY: ClassVar[list[str]] = []
+    _hist_idx: int = -1
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="shell-outer"):
+            yield RichLog(id="shell-log", highlight=True, markup=True, auto_scroll=True)
+            with Horizontal(id="shell-input-row"):
+                yield Label("❯", id="shell-prompt-label")
+                yield Input(placeholder="enter command...", id="shell-input")
+                yield Button("run", variant="primary", id="shell-run-btn")
+                yield Button("clear", variant="default", id="shell-clear-btn")
+
+    def on_mount(self) -> None:
+        log = self.query_one("#shell-log", RichLog)
+        log.write("[bold cyan]aliasOS shell[/] — [dim]commands run in a subshell; aliases sourced from ~/.aliases.d/[/]")
+        log.write("[dim]tip: use arrow keys for history[/]\n")
+
+    @on(Button.Pressed, "#shell-run-btn")
+    def run_cmd(self) -> None:
+        inp = self.query_one("#shell-input", Input)
+        cmd = inp.value.strip()
+        if not cmd:
+            return
+        ShellTab.HISTORY.append(cmd)
+        self._hist_idx = -1
+        inp.value = ""
+        self._execute(cmd)
+
+    @on(Input.Submitted, "#shell-input")
+    def submit_cmd(self, event: Input.Submitted) -> None:
+        self.run_cmd()
+
+    @on(Button.Pressed, "#shell-clear-btn")
+    def clear_log(self) -> None:
+        self.query_one("#shell-log", RichLog).clear()
+
+    def on_key(self, event) -> None:
+        # arrow history — only when shell input is focused
+        try:
+            inp = self.query_one("#shell-input", Input)
+        except NoMatches:
+            return
+        if not inp.has_focus:
+            return
+        if event.key == "up" and ShellTab.HISTORY:
+            self._hist_idx = min(self._hist_idx + 1, len(ShellTab.HISTORY) - 1)
+            inp.value = ShellTab.HISTORY[-(self._hist_idx + 1)]
+            event.stop()
+        elif event.key == "down":
+            if self._hist_idx > 0:
+                self._hist_idx -= 1
+                inp.value = ShellTab.HISTORY[-(self._hist_idx + 1)]
+            else:
+                self._hist_idx = -1
+                inp.value = ""
+            event.stop()
+
+    @work(thread=True)
+    def _execute(self, cmd: str) -> None:
+        log = self.app.query_one("#shell-log", RichLog)
+        self.app.call_from_thread(log.write, f"[bold green]❯[/] [white]{cmd}[/]")
+
+        # Build a shell that sources aliases
+        source_cmds = ""
+        if ALIAS_DIR.exists():
+            for f in sorted(ALIAS_DIR.rglob("*.sh")):
+                source_cmds += f"source {f} 2>/dev/null; "
+        if BASHRC.exists():
+            source_cmds += f"source {BASHRC} 2>/dev/null; "
+
+        shell_cmd = f"bash -c '{source_cmds}{cmd}' 2>&1"
+
+        try:
+            proc = subprocess.Popen(
+                shell_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            output_lines = []
+            for line in proc.stdout:
+                output_lines.append(line.rstrip())
+                if len(output_lines) <= 200:
+                    self.app.call_from_thread(log.write, line.rstrip())
+            proc.wait()
+            if proc.returncode != 0:
+                self.app.call_from_thread(
+                    log.write,
+                    f"[dim red]exit {proc.returncode}[/]"
+                )
+            if len(output_lines) > 200:
+                self.app.call_from_thread(
+                    log.write,
+                    f"[dim]… output truncated ({len(output_lines)} lines)[/]"
+                )
+        except Exception as e:
+            self.app.call_from_thread(log.write, f"[red]error: {e}[/]")
+
+        self.app.call_from_thread(log.write, "")
+
+
+class GapAnalysisTab(Container):
+    """Tab: gap analysis with one-click apply."""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="gap-outer"):
+            with Horizontal(id="gap-filter-row"):
+                yield Label("priority:")
+                yield Select(
+                    [("all", "all"), ("high", "high"), ("medium", "medium")],
+                    value="all",
+                    id="gap-priority-sel",
+                )
+            yield DataTable(id="gap-table", zebra_stripes=True, cursor_type="row")
+            with Horizontal(id="gap-actions"):
+                yield Button("apply suggestion", variant="warning", id="btn-gap-apply")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#gap-table", DataTable)
+        table.add_columns("priority", "category", "alias", "command")
+        self._refresh()
+
+    def _refresh(self, priority_filter: str = "all") -> None:
+        table = self.query_one("#gap-table", DataTable)
+        table.clear()
+        existing = {e.name for e in load_aliases()}
+        for cat, name, cmd, priority in GAPS:
+            if priority_filter != "all" and priority != priority_filter:
+                continue
+            if name in existing:
+                # already exists — show as done
+                p_text = Text("✓ done", style="dim green")
+                n_text = Text(name, style="dim")
+                c_text = Text(cmd, style="dim")
+                cat_text = Text(cat, style="dim")
+            else:
+                p_color = "red" if priority == "high" else "yellow"
+                p_text = Text(priority, style=p_color)
+                n_text = Text(name, style="bold cyan")
+                c_text = Text(cmd, style="white")
+                cat_text = Text(cat, style="yellow")
+            table.add_row(p_text, cat_text, n_text, c_text, key=name)
+
+    @on(Select.Changed, "#gap-priority-sel")
+    def filter_changed(self, event: Select.Changed) -> None:
+        self._refresh(str(event.value))
+
+    def _selected_gap(self):
+        table = self.query_one("#gap-table", DataTable)
+        if table.cursor_row < 0:
+            return None
+        existing = {e.name for e in load_aliases()}
+        visible = [g for g in GAPS]
+        sel = self.query_one("#gap-priority-sel", Select)
+        pf = str(sel.value) if sel.value else "all"
+        if pf != "all":
+            visible = [g for g in visible if g[3] == pf]
+        if table.cursor_row >= len(visible):
+            return None
+        return visible[table.cursor_row]
+
+    @on(Button.Pressed, "#btn-gap-apply")
+    def apply_gap(self) -> None:
+        gap = self._selected_gap()
+        if not gap:
+            return
+        cat, name, cmd, priority = gap
+        existing = {e.name for e in load_aliases()}
+        if name in existing:
+            self.app.notify(f"{name} already exists", severity="information")
+            return
+        self.app.push_screen(
+            GapApplyModal(cat, name, cmd),
+            callback=self._on_gap_result,
+        )
+
+    def _on_gap_result(self, result: AliasEntry | None) -> None:
+        if result:
+            write_alias(result)
+            self._refresh()
+            self.app.notify(f"applied: {result.name}", severity="information")
+
+
+class AliasOSTUI(App):
+    """aliasOS — bad_banana operator profile TUI"""
+
+    TITLE = "aliasOS"
+    SUB_TITLE = "bad_banana operator profile"
+
+    CSS = CSS
+
+    BINDINGS = [
+        Binding("ctrl+q", "quit", "quit"),
+        Binding("ctrl+r", "reload", "reload aliases"),
+        Binding("1", "switch_tab('alias-browser')", "aliases"),
+        Binding("2", "switch_tab('ecosystem')", "ecosystem"),
+        Binding("3", "switch_tab('shell')", "shell"),
+        Binding("4", "switch_tab('gaps')", "gap analysis"),
+        Binding("n", "new_alias", "new alias"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with TabbedContent(initial="alias-browser"):
+            with TabPane("aliases [1]", id="alias-browser"):
+                yield AliasBrowserTab()
+            with TabPane("ecosystem [2]", id="ecosystem"):
+                yield EcosystemTab()
+            with TabPane("shell [3]", id="shell"):
+                yield ShellTab()
+            with TabPane("gap analysis [4]", id="gaps"):
+                yield GapAnalysisTab()
+        yield Footer()
+
+    def action_reload(self) -> None:
+        try:
+            browser = self.query_one(AliasBrowserTab)
+            browser.reload()
+            self.notify("aliases reloaded", severity="information")
+        except NoMatches:
+            pass
+
+    def action_switch_tab(self, tab_id: str) -> None:
+        self.query_one(TabbedContent).active = tab_id
+
+    def action_new_alias(self) -> None:
+        try:
+            browser = self.query_one(AliasBrowserTab)
+            browser.new_alias()
+        except NoMatches:
+            pass
+
+
+if __name__ == "__main__":
+    app = AliasOSTUI()
+    app.run()
