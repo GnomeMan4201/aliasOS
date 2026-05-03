@@ -706,6 +706,75 @@ TabbedContent > TabPane {
     border-top: solid $primary-darken-2;
 }
 
+
+/* ── Operator Status ── */
+#op-outer {
+    layout: vertical;
+    height: 100%;
+    padding: 1 2;
+}
+#op-header-row {
+    height: 3;
+    layout: horizontal;
+    align: left middle;
+    border-bottom: solid $primary-darken-2;
+    margin-bottom: 1;
+}
+#op-state-label {
+    width: 1fr;
+    text-style: bold;
+}
+#op-updated-label {
+    color: $text-muted;
+    width: auto;
+}
+#op-signals {
+    height: auto;
+    margin-bottom: 1;
+}
+.op-row {
+    height: 1;
+    layout: horizontal;
+}
+.op-row-label {
+    width: 20;
+    color: $text-muted;
+}
+.op-row-bar {
+    width: 22;
+    color: $accent;
+}
+.op-row-value {
+    width: auto;
+    color: $text;
+}
+.op-state-stable  { color: $success; text-style: bold; }
+.op-state-watch   { color: $warning; text-style: bold; }
+.op-state-degraded{ color: $error;   text-style: bold; }
+.op-state-clamped { color: $error;   text-style: bold reverse; }
+#op-weakness-row {
+    height: 1;
+    layout: horizontal;
+    margin-top: 1;
+}
+#op-corpus-row {
+    height: 1;
+    layout: horizontal;
+}
+.op-meta-label { color: $text-muted; width: 20; }
+.op-meta-value { color: $text; }
+#op-footer-row {
+    height: 3;
+    layout: horizontal;
+    align: right middle;
+    border-top: solid $primary-darken-2;
+    margin-top: 1;
+}
+#op-unavailable {
+    color: $warning;
+    padding: 1 0;
+}
+
 /* ── Misc ── */
 .section-header {
     color: $accent;
@@ -714,6 +783,191 @@ TabbedContent > TabPane {
 }
 .muted { color: $text-muted; }
 """
+
+
+
+# ─────────────────────────────────────────────
+# OPERATOR STATUS TAB
+# ─────────────────────────────────────────────
+
+def _op_bar(v: float, w: int = 20) -> str:
+    """ASCII progress bar 0-1."""
+    f = round(v * w)
+    return "█" * f + "░" * (w - f)
+
+
+def _op_load():
+    """
+    Load Operator state. Returns dict or None if opctl unavailable.
+    Never raises — always safe to call.
+    """
+    try:
+        import sys
+        import importlib
+        # Resolve opctl from the operator repo
+        op_path = str(__import__("pathlib").Path.home() / "repos" / "operator")
+        if op_path not in sys.path:
+            sys.path.insert(0, op_path)
+
+        ctx_mod = importlib.import_module("opctl.ai.context")
+        state_mod = importlib.import_module("opctl.control.state")
+
+        bundle = ctx_mod.build_evidence_bundle()
+        current = state_mod.get_current_state()
+
+        return {
+            "available": True,
+            "state":     bundle.control_state,
+            "updated":   (current.get("updated_at") or "")[:19].replace("T", " "),
+            "eval_id":   bundle.control_eval_id[:16] if bundle.control_eval_id else "—",
+            "beh_risk":  bundle.behavior_risk,
+            "beh_label": bundle.behavior_label,
+            "fail_press":bundle.failure_pressure,
+            "fail_label":bundle.failure_label,
+            "divergence":bundle.divergence,
+            "div_flag":  bundle.divergence_flagged,
+            "recorder":  bundle.recorder_integrity,
+            "open_w":    bundle.weakness_open,
+            "resolved_w":bundle.weakness_resolved,
+            "regressed_w":bundle.weakness_regressed,
+            "corpus_prom":bundle.corpus_promoted,
+            "corpus_disc":bundle.corpus_discovered,
+            "flags":     bundle.control_flags,
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+class OperatorTab(Container):
+    """Tab 5: live Operator control state widget."""
+
+    REFRESH_INTERVAL = 30  # seconds
+
+    def compose(self) -> ComposeResult:
+        with Container(id="op-outer"):
+            with Horizontal(id="op-header-row"):
+                yield Static("OPERATOR", id="op-state-label")
+                yield Static("", id="op-updated-label")
+            yield Static("loading...", id="op-unavailable")
+            with Container(id="op-signals"):
+                with Horizontal(classes="op-row", id="op-beh-row"):
+                    yield Static("Behavior Risk", classes="op-row-label")
+                    yield Static("", classes="op-row-bar", id="op-beh-bar")
+                    yield Static("", classes="op-row-value", id="op-beh-val")
+                with Horizontal(classes="op-row", id="op-fail-row"):
+                    yield Static("Fail Pressure", classes="op-row-label")
+                    yield Static("", classes="op-row-bar", id="op-fail-bar")
+                    yield Static("", classes="op-row-value", id="op-fail-val")
+                with Horizontal(classes="op-row", id="op-div-row"):
+                    yield Static("Divergence", classes="op-row-label")
+                    yield Static("", classes="op-row-bar", id="op-div-bar")
+                    yield Static("", classes="op-row-value", id="op-div-val")
+                with Horizontal(classes="op-row", id="op-rec-row"):
+                    yield Static("Recorder", classes="op-row-label")
+                    yield Static("", classes="op-row-value", id="op-rec-val")
+            with Horizontal(id="op-weakness-row"):
+                yield Static("Weaknesses", classes="op-meta-label")
+                yield Static("", classes="op-meta-value", id="op-weakness-val")
+            with Horizontal(id="op-corpus-row"):
+                yield Static("Corpus", classes="op-meta-label")
+                yield Static("", classes="op-meta-value", id="op-corpus-val")
+            with Horizontal(id="op-footer-row"):
+                yield Button("refresh", id="op-refresh-btn", variant="default")
+
+    def on_mount(self) -> None:
+        self.refresh_data()
+        self.set_interval(self.REFRESH_INTERVAL, self.refresh_data)
+
+    @work(thread=True)
+    def refresh_data(self) -> None:
+        data = _op_load()
+        self.app.call_from_thread(self._apply, data)
+
+    def _apply(self, data: dict) -> None:
+        try:
+            unavail = self.query_one("#op-unavailable", Static)
+            state_lbl = self.query_one("#op-state-label", Static)
+            updated_lbl = self.query_one("#op-updated-label", Static)
+
+            if not data.get("available"):
+                unavail.update(
+                    f"[yellow]Operator unavailable[/]: {data.get('error','?')}"
+                )
+                state_lbl.update("OPERATOR  [dim]offline[/]")
+                return
+
+            unavail.update("")
+
+            state = data["state"]
+            state_cls = {
+                "STABLE":   "op-state-stable",
+                "WATCH":    "op-state-watch",
+                "DEGRADED": "op-state-degraded",
+                "CLAMPED":  "op-state-clamped",
+            }.get(state, "")
+            icons = {
+                "STABLE":   "✓",
+                "WATCH":    "!",
+                "DEGRADED": "!!",
+                "CLAMPED":  "!!!",
+            }
+            state_lbl.update(
+                f"OPERATOR  [{state_cls}]{icons.get(state,'')} {state}[/{state_cls}]"
+                + (f"  [dim]{data['eval_id']}[/]" if data.get("eval_id") else "")
+            )
+            updated_lbl.update(data.get("updated", ""))
+
+            def _bar_w(key):
+                return self.query_one(f"#op-{key}-bar", Static)
+            def _val_w(key):
+                return self.query_one(f"#op-{key}-val", Static)
+
+            br = data["beh_risk"]
+            _bar_w("beh").update(_op_bar(br))
+            _val_w("beh").update(f"{br:.2f}  {data['beh_label']}")
+
+            fp = data["fail_press"]
+            _bar_w("fail").update(_op_bar(fp))
+            _val_w("fail").update(f"{fp:.2f}  {data['fail_label']}")
+
+            dv = data["divergence"]
+            _bar_w("div").update(_op_bar(dv))
+            _val_w("div").update(
+                f"{dv:.2f}  {'[yellow]FLAGGED[/]' if data['div_flag'] else 'normal'}"
+            )
+
+            rec = data["recorder"]
+            rec_color = (
+                "green" if rec == "OK"
+                else "yellow" if rec == "STALE"
+                else "red"
+            )
+            _val_w("rec").update(f"[{rec_color}]{rec}[/{rec_color}]")
+
+            self.query_one("#op-weakness-val", Static).update(
+                f"open={data['open_w']}  "
+                f"resolved={data['resolved_w']}  "
+                f"regressed={data['regressed_w']}"
+            )
+            self.query_one("#op-corpus-val", Static).update(
+                f"promoted={data['corpus_prom']}  "
+                f"discovered={data['corpus_disc']}"
+            )
+
+            if data.get("flags"):
+                self.notify(
+                    "Operator flags: " + ", ".join(data["flags"]),
+                    severity="warning",
+                    timeout=4,
+                )
+
+        except Exception:
+            pass
+
+    @on(Button.Pressed, "#op-refresh-btn")
+    def on_refresh(self) -> None:
+        self.query_one("#op-unavailable", Static).update("refreshing...")
+        self.refresh_data()
 
 
 class AliasBrowserTab(Container):
@@ -1193,6 +1447,7 @@ class AliasOSTUI(App):
         Binding("3", "switch_tab('shell')", "shell"),
         Binding("4", "switch_tab('gaps')", "gap analysis"),
         Binding("n", "new_alias", "new alias"),
+        Binding("5", "switch_tab('operator')", "operator", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -1206,6 +1461,8 @@ class AliasOSTUI(App):
                 yield ShellTab()
             with TabPane("gap analysis [4]", id="gaps"):
                 yield GapAnalysisTab()
+            with TabPane("operator [5]", id="operator"):
+                yield OperatorTab()
         yield Footer()
 
     def action_reload(self) -> None:
