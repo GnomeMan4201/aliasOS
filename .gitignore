@@ -5,11 +5,4 @@ venv/
 env/
 __pycache__/
 *.pyc
-
-# Python virtual environments
-.venv/
-venv/
-env/
-__pycache__/
-*.pyc
 shell/
